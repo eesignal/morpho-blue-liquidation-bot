@@ -17,7 +17,8 @@
     "build:pricers": "pnpm --filter @morpho-blue-liquidation-bot/pricers build",
     "deploy:executor": "pnpm build && tsx apps/client/src/deployExecutor.ts",
     "liquidate": "pnpm build && tsx apps/client/src/script.ts --env-file=.env",
-    "skim": "pnpm build && tsx apps/client/src/skim.ts --env-file=.env"
+    "skim": "pnpm build && tsx apps/client/src/skim.ts --env-file=.env",
+    "arb": "pnpm build && tsx apps/client/src/arbitrage.ts --env-file=.env"
   },
   "lint-staged": {
     "*.ts": [
