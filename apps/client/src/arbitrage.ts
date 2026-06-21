@@ -20,6 +20,7 @@
 import { chainConfigs } from "@morpho-blue-liquidation-bot/config";
 import { getChainAddresses } from "@morpho-org/blue-sdk";
 import dotenv from "dotenv";
+import { ExecutorEncoder } from "executooor-viem";
 import {
   type Address,
   type Hex,
@@ -35,7 +36,6 @@ import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 
 import { morphoBlueAbi } from "./abis/morpho/morphoBlue.js";
-import { LiquidationEncoder } from "./utils/LiquidationEncoder.js";
 
 // Default router / vault addresses per chain. Override with --uniswap-v3-router / --balancer-vault.
 const DEFAULT_UNISWAP_V3_ROUTER: Record<number, Address> = {
@@ -222,10 +222,11 @@ async function run() {
 
   // The supplyCollateral callback transfers token1 from executor to Morpho
   const supplyCallbackCalls: Hex[] = [
-    LiquidationEncoder.buildErc20Transfer(token1, morphoAddress, minCollateralOut),
+    ExecutorEncoder.buildErc20Transfer(token1, morphoAddress, minCollateralOut),
   ];
 
-  const innerEncoder = new LiquidationEncoder(executorAddress, client);
+  // @ts-expect-error viem peer-dep version mismatch (2.38 vs 2.46) — safe at runtime
+  const innerEncoder = new ExecutorEncoder(executorAddress, client);
   innerEncoder
     .erc20Approve(token0, uniswapV3Router, flashLoanAmount)
     .uniV3ExactInput(uniswapV3Router, swapPath, flashLoanAmount, minCollateralOut)
@@ -241,7 +242,8 @@ async function run() {
   const flashLoanCallbackCalls = innerEncoder.flush();
 
   // 2. Outer encoder: flash loan wrapper + profit skim
-  const encoder = new LiquidationEncoder(executorAddress, client);
+  // @ts-expect-error viem peer-dep version mismatch (2.38 vs 2.46) — safe at runtime
+  const encoder = new ExecutorEncoder(executorAddress, client);
 
   if (argv.flashLoanSource === "morpho") {
     encoder.blueFlashLoan(morphoAddress, token0, flashLoanAmount, flashLoanCallbackCalls);
