@@ -3,21 +3,33 @@
  *
  * Typical use case: oracle price discrepancy or large depeg allows borrowing more token0 than was swapped.
  *
- * Usage:
+ * Usage (UniswapV3 swap):
  *   pnpm arb --chain-id=1 \
  *     --flash-loan-source=morpho \
  *     --token0=0x... \
  *     --token1=0x... \
  *     --flash-loan-amount=1000000000000000000 \
- *     --uniswap-fee=3000 \
  *     --min-collateral-out=1000000 \
  *     --market-id=0x... \
  *     --borrow-amount=1100000000000000000 \
- *     --collection-address=0x... \
+ *     [--uniswap-fee=3000] \
+ *     [--simulate-only]
+ *
+ * Usage (Pendle PT swap — token1 is a Pendle PT):
+ *   pnpm arb --chain-id=1 \
+ *     --flash-loan-source=morpho \
+ *     --swap-venue=pendle \
+ *     --pendle-market=0x... \
+ *     --token0=0x... \
+ *     --token1=0x... \
+ *     --flash-loan-amount=1000000000000000000 \
+ *     --min-collateral-out=1000000 \
+ *     --market-id=0x... \
+ *     --borrow-amount=1100000000000000000 \
  *     [--simulate-only]
  */
 
-import { chainConfigs } from "@morpho-blue-liquidation-bot/config";
+import { chainConfigs, PENDLE_API_URL, PENDLE_SLIPPAGE } from "@morpho-blue-liquidation-bot/config";
 import { getChainAddresses } from "@morpho-org/blue-sdk";
 import dotenv from "dotenv";
 import { ExecutorEncoder } from "executooor-viem";
@@ -29,6 +41,7 @@ import {
   erc20Abi,
   http,
   formatUnits,
+  maxUint256,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { readContract, simulateCalls } from "viem/actions";
@@ -36,6 +49,30 @@ import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 
 import { morphoBlueAbi } from "./abis/morpho/morphoBlue.js";
+
+async function getPendleSwapCallData(
+  chainId: number,
+  pendleMarket: string,
+  tokenIn: string,
+  tokenOut: string,
+  amountIn: bigint,
+  receiver: string,
+) {
+  const params = new URLSearchParams({
+    receiver,
+    slippage: PENDLE_SLIPPAGE.toString(),
+    tokenIn,
+    tokenOut,
+    amountIn: amountIn.toString(),
+  });
+  const url = `${PENDLE_API_URL}v2/sdk/${chainId}/markets/${pendleMarket}/swap?${params}`;
+  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error(`Pendle API error: ${res.statusText}`);
+  return res.json() as Promise<{
+    tx: { data: Hex; to: Address; value: string };
+    data: { amountOut: string; priceImpact: number };
+  }>;
+}
 
 // Default router / vault addresses per chain. Override with --uniswap-v3-router / --balancer-vault.
 const DEFAULT_UNISWAP_V3_ROUTER: Record<number, Address> = {
@@ -82,10 +119,20 @@ async function run() {
       description: "Amount of token0 to flash loan (in wei / smallest unit)",
       demandOption: true,
     })
+    .option("swapVenue", {
+      choices: ["uniswap", "pendle"] as const,
+      description: "Venue used to swap token0 → token1",
+      default: "uniswap" as const,
+    })
     .option("uniswapFee", {
       type: "number",
-      description: "UniswapV3 pool fee tier (500 | 3000 | 10000)",
+      description:
+        "UniswapV3 pool fee tier (500 | 3000 | 10000). Only used when --swap-venue=uniswap.",
       default: 3000,
+    })
+    .option("pendleMarket", {
+      type: "string",
+      description: "Pendle market address. Required when --swap-venue=pendle.",
     })
     .option("minCollateralOut", {
       type: "string",
@@ -154,12 +201,22 @@ async function run() {
   const collectionAddress =
     (argv.collectionAddress as Address | undefined) ?? client.account.address;
 
-  const uniswapV3Router =
-    (argv.uniswapV3Router as Address | undefined) ?? DEFAULT_UNISWAP_V3_ROUTER[chainId];
-  if (!uniswapV3Router) {
-    throw new Error(
-      `No default UniswapV3 router for chainId=${chainId}. Pass --uniswap-v3-router=0x...`,
-    );
+  const swapVenue = argv.swapVenue;
+
+  let uniswapV3Router: Address | undefined;
+  if (swapVenue === "uniswap") {
+    uniswapV3Router =
+      (argv.uniswapV3Router as Address | undefined) ?? DEFAULT_UNISWAP_V3_ROUTER[chainId];
+    if (!uniswapV3Router) {
+      throw new Error(
+        `No default UniswapV3 router for chainId=${chainId}. Pass --uniswap-v3-router=0x...`,
+      );
+    }
+  }
+
+  const pendleMarket = argv.pendleMarket;
+  if (swapVenue === "pendle" && !pendleMarket) {
+    throw new Error(`--pendle-market is required when --swap-venue=pendle`);
   }
 
   // Fetch market params from chain
@@ -199,7 +256,11 @@ async function run() {
   console.log(`  Chain: ${chainConfig.chain.name} (${chainId})`);
   console.log(`  Flash loan source: ${argv.flashLoanSource}`);
   console.log(`  Flash loan: ${formatUnits(flashLoanAmount, token0Decimals)} ${token0Symbol}`);
-  console.log(`  Swap: ${token0Symbol} → ${token1Symbol} (fee=${uniswapFee})`);
+  if (swapVenue === "pendle") {
+    console.log(`  Swap: ${token0Symbol} → ${token1Symbol} (Pendle market=${pendleMarket})`);
+  } else {
+    console.log(`  Swap: ${token0Symbol} → ${token1Symbol} (UniswapV3 fee=${uniswapFee})`);
+  }
   console.log(
     `  Min collateral out: ${formatUnits(minCollateralOut, token1Decimals)} ${token1Symbol}`,
   );
@@ -209,16 +270,12 @@ async function run() {
   console.log(`  Market: ${marketId}`);
   console.log(`  LLTV: ${formatUnits(lltv, 18)}`);
 
-  // Build the UniswapV3 path: token0 → fee → token1 (single hop)
-  const swapPath = encodePacked(["address", "uint24", "address"], [token0, uniswapFee, token1]);
-
   // --- Build calldata ---
 
   // 1. Inner encoder: operations inside the flash loan callback
-  //    a. Approve router to spend token0
-  //    b. Swap token0 → token1 via UniswapV3
-  //    c. Supply token1 as collateral to Morpho (with transfer callback)
-  //    d. Borrow token0 from Morpho back to executor
+  //    a. Approve swap venue and swap token0 → token1
+  //    b. Supply token1 as collateral to Morpho (with transfer callback)
+  //    c. Borrow token0 from Morpho back to executor
 
   // The supplyCollateral callback transfers token1 from executor to Morpho
   const supplyCallbackCalls: Hex[] = [
@@ -227,9 +284,31 @@ async function run() {
 
   // @ts-expect-error viem peer-dep version mismatch (2.38 vs 2.46) — safe at runtime
   const innerEncoder = new ExecutorEncoder(executorAddress, client);
+
+  if (swapVenue === "pendle") {
+    const swapData = await getPendleSwapCallData(
+      chainId,
+      pendleMarket!,
+      token0.toLowerCase(),
+      token1.toLowerCase(),
+      flashLoanAmount,
+      executorAddress,
+    );
+    innerEncoder
+      .erc20Approve(token0, swapData.tx.to, maxUint256)
+      .pushCall(
+        swapData.tx.to,
+        swapData.tx.value ? BigInt(swapData.tx.value) : 0n,
+        swapData.tx.data,
+      );
+  } else {
+    const swapPath = encodePacked(["address", "uint24", "address"], [token0, uniswapFee, token1]);
+    innerEncoder
+      .erc20Approve(token0, uniswapV3Router!, flashLoanAmount)
+      .uniV3ExactInput(uniswapV3Router!, swapPath, flashLoanAmount, minCollateralOut);
+  }
+
   innerEncoder
-    .erc20Approve(token0, uniswapV3Router, flashLoanAmount)
-    .uniV3ExactInput(uniswapV3Router, swapPath, flashLoanAmount, minCollateralOut)
     .morphoBlueSupplyCollateral(
       morphoAddress,
       market,

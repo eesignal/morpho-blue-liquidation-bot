@@ -6,6 +6,7 @@ import { preLiquidationAbi } from "../abis/PreLiquidation";
 
 export class LiquidationEncoder<
   client extends Client<Transport, Chain, Account> = Client<Transport, Chain, Account>,
+  // @ts-expect-error viem peer-dep version mismatch (2.38 vs 2.46) — safe at runtime
 > extends ExecutorEncoder<client> {
   public preLiquidate(
     preLiquidation: Address,
