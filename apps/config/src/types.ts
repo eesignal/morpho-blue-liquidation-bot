@@ -12,8 +12,6 @@ export type LiquidityVenueName =
 
 export type PricerName = "chainlink" | "defillama" | "morphoApi" | "uniswapV3";
 
-export type DataProviderName = "morphoApi" | "hyperIndex";
-
 export interface Config {
   chain: Chain;
   wNative: Address;
@@ -21,16 +19,10 @@ export interface Config {
 }
 
 export interface Options {
-  dataProvider: DataProviderName;
-  vaultWhitelist: Address[] | "morpho-api";
-  additionalMarketsWhitelist: Hex[];
   liquidityVenues: LiquidityVenueName[];
   pricers?: PricerName[];
   treasuryAddress?: Address;
   liquidationBufferBps?: number;
-  useFlashbots: boolean;
-  blockInterval?: number;
-  watchBlocksRetryDelayMs?: number;
 }
 
 export type ChainConfig = Omit<Config, "options"> &
