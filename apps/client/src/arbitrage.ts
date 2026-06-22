@@ -29,50 +29,18 @@
  *     [--simulate-only]
  */
 
-import { chainConfigs, PENDLE_API_URL, PENDLE_SLIPPAGE } from "@morpho-blue-liquidation-bot/config";
+import { chainConfigs } from "@morpho-blue-liquidation-bot/config";
 import { getChainAddresses } from "@morpho-org/blue-sdk";
 import dotenv from "dotenv";
 import { ExecutorEncoder } from "executooor-viem";
-import {
-  type Address,
-  type Hex,
-  createWalletClient,
-  encodePacked,
-  erc20Abi,
-  http,
-  formatUnits,
-  maxUint256,
-} from "viem";
+import { type Address, type Hex, createWalletClient, erc20Abi, http, formatUnits } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { readContract, simulateCalls } from "viem/actions";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 
 import { morphoBlueAbi } from "./abis/morpho/morphoBlue.js";
-
-async function getPendleSwapCallData(
-  chainId: number,
-  pendleMarket: string,
-  tokenIn: string,
-  tokenOut: string,
-  amountIn: bigint,
-  receiver: string,
-) {
-  const params = new URLSearchParams({
-    receiver,
-    slippage: PENDLE_SLIPPAGE.toString(),
-    tokenIn,
-    tokenOut,
-    amountIn: amountIn.toString(),
-  });
-  const url = `${PENDLE_API_URL}v2/sdk/${chainId}/markets/${pendleMarket}/swap?${params}`;
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
-  if (!res.ok) throw new Error(`Pendle API error: ${res.statusText}`);
-  return res.json() as Promise<{
-    tx: { data: Hex; to: Address; value: string };
-    data: { amountOut: string; priceImpact: number };
-  }>;
-}
+import { buildArbCalls } from "./utils/buildArbCalls.js";
 
 // Default router / vault addresses per chain. Override with --uniswap-v3-router / --balancer-vault.
 const DEFAULT_UNISWAP_V3_ROUTER: Record<number, Address> = {
@@ -272,79 +240,36 @@ async function run() {
 
   // --- Build calldata ---
 
-  // 1. Inner encoder: operations inside the flash loan callback
-  //    a. Approve swap venue and swap token0 → token1
-  //    b. Supply token1 as collateral to Morpho (with transfer callback)
-  //    c. Borrow token0 from Morpho back to executor
-
-  // The supplyCollateral callback transfers token1 from executor to Morpho
-  const supplyCallbackCalls: Hex[] = [
-    ExecutorEncoder.buildErc20Transfer(token1, morphoAddress, minCollateralOut),
-  ];
-
-  // @ts-expect-error viem peer-dep version mismatch (2.38 vs 2.46) — safe at runtime
-  const innerEncoder = new ExecutorEncoder(executorAddress, client);
-
-  if (swapVenue === "pendle") {
-    const swapData = await getPendleSwapCallData(
-      chainId,
-      pendleMarket!,
-      token0.toLowerCase(),
-      token1.toLowerCase(),
-      flashLoanAmount,
-      executorAddress,
-    );
-    innerEncoder
-      .erc20Approve(token0, swapData.tx.to, maxUint256)
-      .pushCall(
-        swapData.tx.to,
-        swapData.tx.value ? BigInt(swapData.tx.value) : 0n,
-        swapData.tx.data,
-      );
-  } else {
-    const swapPath = encodePacked(["address", "uint24", "address"], [token0, uniswapFee, token1]);
-    innerEncoder
-      .erc20Approve(token0, uniswapV3Router!, flashLoanAmount)
-      .uniV3ExactInput(uniswapV3Router!, swapPath, flashLoanAmount, minCollateralOut);
-  }
-
-  innerEncoder
-    .morphoBlueSupplyCollateral(
-      morphoAddress,
-      market,
-      minCollateralOut,
-      executorAddress,
-      supplyCallbackCalls,
-    )
-    .morphoBlueBorrow(morphoAddress, market, borrowAmount, 0n, executorAddress, executorAddress);
-
-  const flashLoanCallbackCalls = innerEncoder.flush();
-
-  // 2. Outer encoder: flash loan wrapper + profit skim
   // @ts-expect-error viem peer-dep version mismatch (2.38 vs 2.46) — safe at runtime
   const encoder = new ExecutorEncoder(executorAddress, client);
 
-  if (argv.flashLoanSource === "morpho") {
-    encoder.blueFlashLoan(morphoAddress, token0, flashLoanAmount, flashLoanCallbackCalls);
-  } else {
-    // Balancer
-    const balancerVault =
-      (argv.balancerVault as Address | undefined) ?? DEFAULT_BALANCER_VAULT[chainId];
+  let balancerVault: Address | undefined;
+  if (argv.flashLoanSource === "balancer") {
+    balancerVault = (argv.balancerVault as Address | undefined) ?? DEFAULT_BALANCER_VAULT[chainId];
     if (!balancerVault) {
       throw new Error(
         `No default Balancer vault for chainId=${chainId}. Pass --balancer-vault=0x...`,
       );
     }
-    encoder.balancerFlashLoan(
-      balancerVault,
-      [{ asset: token0, amount: flashLoanAmount }],
-      flashLoanCallbackCalls,
-    );
   }
 
-  encoder.erc20Skim(token0, collectionAddress);
-
-  const calls = encoder.flush();
+  const calls = await buildArbCalls(encoder, {
+    morphoAddress,
+    market,
+    token0,
+    token1,
+    flashLoanAmount,
+    minCollateralOut,
+    borrowAmount,
+    collectionAddress,
+    flashLoanSource: argv.flashLoanSource,
+    swapVenue,
+    chainId,
+    uniswapV3Router,
+    uniswapFee,
+    balancerVault,
+    pendleMarket,
+  });
 
   // --- Simulate ---
   console.log(`\nSimulating...`);

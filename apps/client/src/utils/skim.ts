@@ -23,6 +23,7 @@ export async function skim(
   executorAddress: Address,
   recipient: Address,
 ) {
+  // @ts-expect-error viem peer-dep version mismatch (2.38 vs 2.46) — safe at runtime
   const encoder = new ExecutorEncoder(executorAddress, client);
 
   const [balance, decimals, symbol] = await Promise.all([

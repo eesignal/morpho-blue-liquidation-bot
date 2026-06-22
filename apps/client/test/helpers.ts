@@ -1,21 +1,7 @@
-import type {
-  DataProvider,
-  LiquidatablePositionsResult,
-} from "@morpho-blue-liquidation-bot/data-providers";
-import { OneInch } from "@morpho-blue-liquidation-bot/liquidity-venues";
-import {
-  type AccrualPosition,
-  MarketUtils,
-  type PreLiquidationPosition,
-} from "@morpho-org/blue-sdk";
+import { MarketUtils } from "@morpho-org/blue-sdk";
 import type { AnvilTestClient } from "@morpho-org/test";
-import { ExecutorEncoder } from "executooor-viem";
-import nock from "nock";
 import {
-  type Account,
   type Address,
-  type Chain,
-  type Client,
   encodePacked,
   fromHex,
   type Hex,
@@ -23,61 +9,12 @@ import {
   maxUint128,
   maxUint256,
   toHex,
-  type Transport,
 } from "viem";
 import { getStorageAt, readContract } from "viem/actions";
-import { vi } from "vitest";
 
 import { morphoBlueAbi } from "../src/abis/morpho/morphoBlue";
 
 import { BORROW_SHARES_AND_COLLATERAL_OFFSET, borrower, MORPHO, POSITION_SLOT } from "./constants";
-
-/// Mock data provider
-
-export class MockDataProvider implements DataProvider {
-  private liquidatablePositions: AccrualPosition[] = [];
-  private preLiquidatablePositions: PreLiquidationPosition[] = [];
-
-  setLiquidatablePositions(positions: AccrualPosition[]) {
-    this.liquidatablePositions = positions;
-  }
-
-  setPreLiquidatablePositions(positions: PreLiquidationPosition[]) {
-    this.preLiquidatablePositions = positions;
-  }
-
-  async fetchMarkets(
-    _client: Client<Transport, Chain, Account>,
-    _vaults: Address[],
-  ): Promise<Hex[]> {
-    return [];
-  }
-
-  async fetchLiquidatablePositions(
-    _client: Client<Transport, Chain, Account>,
-    _marketIds: Hex[],
-  ): Promise<LiquidatablePositionsResult> {
-    return {
-      liquidatablePositions: this.liquidatablePositions,
-      preLiquidatablePositions: this.preLiquidatablePositions,
-    };
-  }
-}
-
-/// test liquidity Venues
-
-export class OneInchTest extends OneInch {
-  private readonly supportedNetworks: number[];
-
-  constructor(supportedNetworks: number[]) {
-    super();
-    this.supportedNetworks = supportedNetworks;
-  }
-
-  supportsRoute(encoder: ExecutorEncoder, _src: Address, _dst: Address) {
-    return this.supportedNetworks.includes(encoder.client.chain.id);
-  }
-}
 
 export async function setupPosition(
   client: AnvilTestClient,
@@ -122,110 +59,6 @@ export async function setupPosition(
   });
 
   await overwriteCollateral(client, marketId, borrower.address, collateralAmount / 2n);
-
-  const position = await readContract(client, {
-    address: MORPHO,
-    abi: morphoBlueAbi,
-    functionName: "position",
-    args: [marketId, borrower.address],
-  });
-
-  nock("https://api.morpho.org")
-    .post("/graphql", (body) => {
-      // Match the getLiquidatablePositions query
-      return (
-        body.query?.includes("getLiquidatablePositions") &&
-        body.variables?.chainId === 1 &&
-        (body.variables?.marketIds === undefined ||
-          body.variables?.marketIds?.includes(marketId) ||
-          body.variables?.marketIds?.length === 0)
-      );
-    })
-    .reply(200, {
-      data: {
-        marketPositions: {
-          __typename: "PaginatedMarketPositions",
-          pageInfo: {
-            __typename: "PageInfo",
-            count: 1,
-            countTotal: 1,
-            limit: 100,
-            skip: 0,
-          },
-          items: [
-            {
-              __typename: "MarketPosition",
-              healthFactor: 0.5, // Less than 1 to indicate liquidatable
-              user: {
-                __typename: "User",
-                address: borrower.address,
-              },
-              market: {
-                __typename: "Market",
-                uniqueKey: marketId,
-                oracle: {
-                  __typename: "Oracle",
-                  address: marketParams.oracle,
-                },
-              },
-              state: {
-                __typename: "MarketPositionState",
-                borrowShares: position[1].toString(),
-                collateral: position[2].toString(),
-                supplyShares: position[0].toString(),
-              },
-            },
-          ],
-        },
-      },
-    });
-}
-
-export function mockEtherPrice(
-  etherPrice: number,
-  marketParams: {
-    loanToken: Address;
-    collateralToken: Address;
-    oracle: Address;
-    irm: Address;
-    lltv: bigint;
-  },
-) {
-  nock("https://blue-api.morpho.org")
-    .post("/graphql")
-    .reply(200, {
-      data: {
-        chains: [{ id: 1 }],
-      },
-    })
-    .post("/graphql")
-    .reply(200, {
-      data: {
-        chains: [{ id: 1 }],
-      },
-    })
-    .post("/graphql")
-    .reply(200, {
-      data: {
-        assets: {
-          items: [
-            { address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", priceUsd: etherPrice },
-            { address: marketParams.loanToken, priceUsd: 1 },
-          ],
-        },
-      },
-    })
-    .post("/graphql")
-    .reply(200, {
-      data: {
-        assets: {
-          items: [
-            { address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", priceUsd: etherPrice },
-            { address: marketParams.collateralToken, priceUsd: 1 },
-          ],
-        },
-      },
-    });
 }
 
 async function overwriteCollateral(
@@ -236,6 +69,7 @@ async function overwriteCollateral(
 ) {
   const slot = borrowSharesAndCollateralSlot(user, marketId);
 
+  // @ts-expect-error viem peer-dep version mismatch (2.38 vs 2.46) — safe at runtime
   const value = await getStorageAt(client, {
     address: MORPHO,
     slot,
@@ -244,7 +78,6 @@ async function overwriteCollateral(
   await client.setStorageAt({
     address: MORPHO,
     index: slot,
-
     value: modifyCollateralSlot(value!, amount),
   });
 }
@@ -284,18 +117,31 @@ function modifyCollateralSlot(value: Hex, amount: bigint) {
 }
 
 export const syncTimestamp = async (client: AnvilTestClient, timestamp?: bigint) => {
+  const { vi } = await import("vitest");
   timestamp ??= (await client.timestamp()) + 60n;
 
-  // Use fake timers to mock Date.now() which Time.timestamp() likely uses
   vi.useFakeTimers({
     now: Number(timestamp) * 1000,
-    toFake: ["Date"], // Avoid faking setTimeout, used to delay retries.
+    toFake: ["Date"],
   });
-
-  // Also set system time to ensure Time.timestamp() uses the mocked time
   vi.setSystemTime(Number(timestamp) * 1000);
 
   await client.setNextBlockTimestamp({ timestamp });
 
   return timestamp;
 };
+
+export async function getPositionCollateral(
+  client: AnvilTestClient,
+  marketId: Hex,
+  user: Address,
+): Promise<bigint> {
+  // @ts-expect-error viem peer-dep version mismatch (2.38 vs 2.46) — safe at runtime
+  const [, , collateral] = await readContract(client, {
+    address: MORPHO,
+    abi: morphoBlueAbi,
+    functionName: "position",
+    args: [marketId, user],
+  });
+  return collateral;
+}

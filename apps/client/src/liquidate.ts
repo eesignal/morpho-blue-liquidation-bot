@@ -24,7 +24,6 @@ import {
   formatUnits,
   getAddress,
   http,
-  maxUint256,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { readContract, simulateCalls, writeContract } from "viem/actions";
@@ -32,6 +31,7 @@ import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 
 import { morphoBlueAbi } from "./abis/morpho/morphoBlue.js";
+import { buildLiquidateCalls } from "./utils/buildLiquidateCalls.js";
 import { LiquidationEncoder } from "./utils/LiquidationEncoder.js";
 
 async function run() {
@@ -150,52 +150,18 @@ async function run() {
 
   const encoder = new LiquidationEncoder(executorAddress, client);
 
-  // Convert collateral → loan token via venues
-  let toConvert = {
-    src: getAddress(collateralToken),
-    dst: getAddress(loanToken),
-    srcAmount: seizedAssets,
-  };
-
-  let converted = false;
-  for (const venue of liquidityVenues) {
-    try {
-      // @ts-expect-error viem peer-dep version mismatch (2.38 vs 2.46) — safe at runtime
-      if (await venue.supportsRoute(encoder, toConvert.src, toConvert.dst)) {
-        // @ts-expect-error viem peer-dep version mismatch (2.38 vs 2.46) — safe at runtime
-        toConvert = await venue.convert(encoder, toConvert);
-      }
-    } catch (error) {
-      console.warn(`  Venue failed: ${error instanceof Error ? error.message : String(error)}`);
-      continue;
-    }
-    if (toConvert.src === toConvert.dst) {
-      converted = true;
-      break;
-    }
-  }
-
-  if (!converted) {
-    throw new Error(`No liquidity venue found to convert ${collateralSymbol} → ${loanSymbol}`);
-  }
-
-  // Approve morpho to pull loan token for repayment, then liquidate
-  encoder.erc20Approve(loanToken, morphoAddress, maxUint256);
-
-  const liquidationCallbackCalls = encoder.flush();
-
-  encoder.morphoBlueLiquidate(
+  const calls = await buildLiquidateCalls(encoder, {
     morphoAddress,
     market,
     borrower,
     seizedAssets,
-    0n,
-    liquidationCallbackCalls,
-  );
+    liquidityVenues,
+    treasuryAddress,
+  });
 
-  encoder.erc20Skim(loanToken, treasuryAddress);
-
-  const calls = encoder.flush();
+  if (!calls) {
+    throw new Error(`No liquidity venue found to convert ${collateralSymbol} → ${loanSymbol}`);
+  }
 
   // Simulate
   console.log(`\nSimulating...`);
